@@ -1,10 +1,12 @@
-import { config } from '@/config';
-import logger from '@/utils/logger';
-import { parseDate } from '@/utils/parse-date';
-import puppeteer from '@/utils/puppeteer';
-import ofetch from '@/utils/ofetch';
 import { load } from 'cheerio';
+
+import { config } from '@/config';
+import CaptchaError from '@/errors/types/captcha';
 import cache from '@/utils/cache';
+import logger from '@/utils/logger';
+import ofetch from '@/utils/ofetch';
+import { parseDate } from '@/utils/parse-date';
+import puppeteer, { getPuppeteerPage } from '@/utils/puppeteer';
 
 // Common headers for requests
 const getHeaders = (cookie?: string) => ({
@@ -31,19 +33,25 @@ const getUser = (url, cache) =>
     cache.tryGet(
         url,
         async () => {
-            const browser = await puppeteer();
+            const { page, destory } = await getPuppeteerPage(url, {
+                onBeforeLoad: async (page) => {
+                    await page.setRequestInterception(true);
+                    page.on('request', (request) => {
+                        request.resourceType() === 'document' || request.resourceType() === 'script' || request.resourceType() === 'xhr' || request.resourceType() === 'other' ? request.continue() : request.abort();
+                    });
+                },
+            });
             try {
-                const page = await browser.newPage();
-                await page.setRequestInterception(true);
                 let collect = '';
-                page.on('request', (request) => {
-                    request.resourceType() === 'document' || request.resourceType() === 'script' || request.resourceType() === 'xhr' || request.resourceType() === 'other' ? request.continue() : request.abort();
-                });
                 logger.http(`Requesting ${url}`);
                 await page.goto(url, {
                     waitUntil: 'domcontentloaded',
                 });
-                await page.waitForSelector('div.reds-tab-item:nth-child(2)');
+                await page.waitForSelector('div.reds-tab-item:nth-child(2), #red-captcha');
+
+                if (await page.$('#red-captcha')) {
+                    throw new CaptchaError('小红书风控校验，请稍后再试');
+                }
 
                 const initialState = await page.evaluate(() => (window as any).__INITIAL_STATE__);
 
@@ -69,7 +77,7 @@ const getUser = (url, cache) =>
 
                 return { userPageData, notes, collect };
             } finally {
-                await browser.close();
+                await destory();
             }
         },
         config.cache.routeExpire,
@@ -275,4 +283,4 @@ async function checkCookie() {
     return res.code === 0 && !!res.data.user_id;
 }
 
-export { getUser, getBoard, formatText, formatNote, renderNotesFulltext, getFullNote, getUserWithCookie, checkCookie };
+export { checkCookie, formatNote, formatText, getBoard, getFullNote, getUser, getUserWithCookie, renderNotesFulltext };
